@@ -10,6 +10,7 @@ const PORT = process.env.PORT || 3000;
 //  HEALTHCHECK
 // ============================================================
 app.get("/", (req, res) => {
+  console.log("[ROOT] Healthcheck chamado");
   res.json({
     ok: true,
     service: "eproc-playwright",
@@ -25,12 +26,14 @@ function limparNumero(numero) {
 }
 
 // ============================================================
-//  ROTA EPROC TJSP
+//  ROTA EPROC TJSP - CONSULTA UNIFICADA
 // ============================================================
 app.post("/eproc", async (req, res) => {
   const numeroCNJ = limparNumero(req.body?.numeroCNJ);
+  console.log("[EPROC] Requisição recebida. numeroCNJ =", numeroCNJ);
 
   if (!numeroCNJ || numeroCNJ.length !== 20) {
+    console.log("[EPROC] numeroCNJ inválido");
     return res.status(400).json({
       ok: false,
       erro: "numeroCNJ inválido"
@@ -40,6 +43,7 @@ app.post("/eproc", async (req, res) => {
   let browser;
 
   try {
+    console.log("[EPROC] Abrindo Chromium...");
     browser = await chromium.launch({
       headless: true,
       args: [
@@ -50,6 +54,7 @@ app.post("/eproc", async (req, res) => {
       ]
     });
 
+    console.log("[EPROC] Criando contexto...");
     const context = await browser.newContext({
       viewport: { width: 1366, height: 900 },
       userAgent:
@@ -59,9 +64,7 @@ app.post("/eproc", async (req, res) => {
 
     const page = await context.newPage();
 
-    // ------------------------------------------------------------
-    // 1. Abre a consulta pública
-    // ------------------------------------------------------------
+    console.log("[EPROC] Indo para a consulta unificada...");
     await page.goto(
       "https://eproc-consulta.tjsp.jus.br/consulta_1g/externo_controlador.php?acao=tjsp@consulta_unificada_publica/consultar",
       {
@@ -70,84 +73,111 @@ app.post("/eproc", async (req, res) => {
       }
     );
 
-    // ------------------------------------------------------------
-    // 2. Aguarda a tela carregar
-    // ------------------------------------------------------------
+    console.log("[EPROC] URL atual após goto:", page.url());
+    console.log("[EPROC] Título após goto:", await page.title());
+
     await page.waitForTimeout(5000);
 
-    // ------------------------------------------------------------
-    // 3. Se houver Turnstile, dá tempo para resolver/validar
-    // ------------------------------------------------------------
     const temCaptcha = await page.locator(".cf-turnstile").count();
+    console.log("[EPROC] Captcha detectado?", temCaptcha > 0);
 
     if (temCaptcha > 0) {
-      console.log("Captcha detectado. Aguardando resolução automática...");
-      await page.waitForTimeout(15000);
+      console.log("[EPROC] Aguardando validação automática do Turnstile...");
+
+      try {
+        await page.waitForFunction(() => {
+          const hidden = document.querySelector("#hdnInfraCaptcha");
+          return hidden && hidden.value === "1";
+        }, { timeout: 45000 });
+
+        console.log("[EPROC] Turnstile validado via hdnInfraCaptcha=1.");
+      } catch (e) {
+        console.log("[EPROC] hdnInfraCaptcha não ficou = 1 dentro do prazo.");
+      }
+
+      await page.waitForTimeout(3000);
     }
 
-    // ------------------------------------------------------------
-    // 4. Preenche o número do processo
-    // ------------------------------------------------------------
-    await page.waitForSelector('input[name="numNrProcesso"]', {
+    const captchaHiddenValueAntes = await page.locator("#hdnInfraCaptcha").count()
+      ? await page.locator("#hdnInfraCaptcha").inputValue()
+      : null;
+
+    console.log("[EPROC] Valor de #hdnInfraCaptcha antes da consulta:", captchaHiddenValueAntes);
+
+    console.log("[EPROC] Procurando campo #txtNumProcesso...");
+    await page.waitForSelector("#txtNumProcesso", {
       timeout: 60000
     });
 
-    await page.fill('input[name="numNrProcesso"]', numeroCNJ);
+    console.log("[EPROC] Campo encontrado. Preenchendo número...");
+    await page.fill("#txtNumProcesso", numeroCNJ);
 
-    // ------------------------------------------------------------
-    // 5. Clica em consultar
-    // ------------------------------------------------------------
+    console.log("[EPROC] Procurando botão #sbmNovo...");
+    await page.waitForSelector("#sbmNovo", {
+      timeout: 60000
+    });
+
+    console.log("[EPROC] Clicando em consultar...");
     await Promise.all([
       page.waitForLoadState("domcontentloaded", { timeout: 120000 }),
-      page.click('button[name="sbmConsultar"]')
+      page.click("#sbmNovo")
     ]);
 
+    console.log("[EPROC] Clique executado. Aguardando 8000 ms...");
     await page.waitForTimeout(8000);
 
-    // ------------------------------------------------------------
-    // 6. Detecta se abriu lista ou já foi direto ao processo
-    // ------------------------------------------------------------
     const htmlAtual = await page.content();
+    console.log("[EPROC] HTML atual length:", htmlAtual.length);
+    console.log("[EPROC] URL após consulta:", page.url());
+    console.log("[EPROC] Título após consulta:", await page.title());
 
-    // Se ainda estiver na tela de busca, provavelmente captcha bloqueou
+    const captchaHiddenValueDepois = await page.locator("#hdnInfraCaptcha").count()
+      ? await page.locator("#hdnInfraCaptcha").inputValue()
+      : null;
+
+    console.log("[EPROC] Valor de #hdnInfraCaptcha após consulta:", captchaHiddenValueDepois);
+
     if (
-      htmlAtual.includes("Consulta Processual - Busca de Processo") &&
-      htmlAtual.includes("cf-turnstile")
+      htmlAtual.includes("Consulta Processual") &&
+      htmlAtual.includes("cf-turnstile") &&
+      captchaHiddenValueDepois !== "1"
     ) {
+      console.log("[EPROC] Captcha ainda não validado de fato.");
       return res.status(403).json({
         ok: false,
         erro: "captcha_turnstile_bloqueando_fluxo"
       });
     }
 
-    // Se cair em página de resultados/lista, tenta clicar no primeiro processo
     const linksProcesso = await page.locator('a[href*="exibir_processo"]').count();
+    console.log("[EPROC] Links de processo encontrados:", linksProcesso);
 
     if (linksProcesso > 0) {
+      console.log("[EPROC] Clicando no primeiro link do processo...");
       await Promise.all([
         page.waitForLoadState("domcontentloaded", { timeout: 120000 }),
         page.locator('a[href*="exibir_processo"]').first().click()
       ]);
 
       await page.waitForTimeout(5000);
+      console.log("[EPROC] Processo aberto.");
+      console.log("[EPROC] URL final:", page.url());
+      console.log("[EPROC] Título final:", await page.title());
     }
 
-    // ------------------------------------------------------------
-    // 7. Captura o HTML final
-    // ------------------------------------------------------------
     const htmlFinal = await page.content();
-
-    const titulo = await page.title().catch(() => "");
+    console.log("[EPROC] HTML final capturado. Length =", htmlFinal.length);
 
     return res.json({
       ok: true,
-      titulo,
+      titulo: await page.title(),
+      urlFinal: page.url(),
       htmlLength: htmlFinal.length,
       html: htmlFinal
     });
 
   } catch (e) {
-    console.error("Erro /eproc:", e);
+    console.error("[EPROC] ERRO:", e);
 
     return res.status(500).json({
       ok: false,
@@ -155,6 +185,7 @@ app.post("/eproc", async (req, res) => {
     });
   } finally {
     if (browser) {
+      console.log("[EPROC] Fechando browser...");
       await browser.close().catch(() => {});
     }
   }
