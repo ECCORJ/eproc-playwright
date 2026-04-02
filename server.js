@@ -63,7 +63,7 @@ app.post("/eproc", async (req, res) => {
     // 1. Abre a consulta pública
     // ------------------------------------------------------------
     await page.goto(
-      "https://eproc-consulta.tjsp.jus.br/consulta_1g/externo_controlador.php?acao=tjsp@consulta_publica_eproc/consultar&tipoConsulta=NU&hash=fff89e2fd8cbe929a7254ff36844a36a",
+      "https://eproc-consulta.tjsp.jus.br/consulta_1g/externo_controlador.php?acao=tjsp@consulta_unificada_publica/consultar",
       {
         waitUntil: "domcontentloaded",
         timeout: 120000
